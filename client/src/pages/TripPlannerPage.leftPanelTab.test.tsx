@@ -2,7 +2,7 @@ import { fireEvent, screen } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 
 import { render } from '../../tests/helpers/render';
-import { PanelTab } from './TripPlannerPage';
+import { PanelTab } from './tripPlanner/PanelTab';
 
 // FE-PAGE-PLANNER-LEFTTAB-001 to FE-PAGE-PLANNER-LEFTTAB-005
 

@@ -29,7 +29,7 @@ import TripWarningsBanner from '../components/Planner/TripWarningsBanner'
 import Navbar from '../components/Layout/Navbar'
 import HelpAnchor from '../components/Help/HelpAnchor'
 import { getHelpContext } from '../help/registry'
-import { X, PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen } from 'lucide-react'
+import { X, PanelRightClose, PanelRightOpen } from 'lucide-react'
 import ConfirmDialog from '../components/shared/ConfirmDialog'
 import { Tooltip } from '../components/shared/Tooltip'
 import type { Reservation } from '../types'
@@ -45,6 +45,9 @@ import {
 import { LazyPanel } from './tripPlanner/LazyPanel'
 import { ListsContainer } from './tripPlanner/ListsContainer'
 import { PlanMapStage } from './tripPlanner/PlanMapStage'
+import { PanelTab } from './tripPlanner/PanelTab'
+import { PlanFocusLayer } from './tripPlanner/focus/PlanFocusLayer'
+import { usePlanView } from './tripPlanner/focus/usePlanView'
 import { TourPlannerMapStage } from './tripPlanner/TourPlannerMapStage'
 import { useMergedMapPois } from '../components/Map/useMergedMapPois'
 import { useTouchDragBridge } from '../hooks/useTouchDragBridge'
@@ -179,6 +182,7 @@ function TripPlannerPageDesktop(): React.ReactElement | null {
     tripId, tripCurrency: trip?.currency, receiptExpense, clearReceiptExpense,
   })
   const distanceUnit = useSettingsStore(s => s.settings.distance_unit)
+  const planView = usePlanView(!isMobile && !roadtripActive)
   // Transit search departs against a real date, so the whole Automated mode —
   // the day-header tram button and the modal's mode switch — is off without one.
   const tripHasDates = Boolean(trip?.start_date && trip?.end_date)
@@ -264,7 +268,7 @@ function TripPlannerPageDesktop(): React.ReactElement | null {
         <TripWarningsBanner tripId={tripId} onOpenPluginTab={(pid) => handleTabChange(`plugin:${pid}`)} />
 
         {activeTab === 'plan' && (
-          <div style={{ position: 'absolute', inset: 0 }}>
+          <div style={{ position: 'absolute', inset: 0, visibility: planView.active ? 'hidden' : undefined }}>
             <PlanMapStage
               tripId={tripId} trip={trip} can={can} days={days} places={places} reservations={reservations} isMobile={isMobile}
               selectedDayId={selectedDayId} selectedPlaceId={selectedPlaceId} selectedPlace={selectedPlace} showDayDetail={showDayDetail} handleSelectDay={handleSelectDay}
@@ -617,6 +621,10 @@ function TripPlannerPageDesktop(): React.ReactElement | null {
             )}
           </div>
         )}
+        {activeTab === 'plan' && <PlanFocusLayer view={planView} days={days} places={places} categories={categories} assignments={storedAssignments}
+          reservations={reservations} accommodations={tripAccommodations} selectedDayId={selectedDayId} canEdit={can('day_edit', trip)} onSelectDay={handleSelectDay}
+          onAssignToDay={handleAssignToDay} onSetTimes={(dayId, id, times) => tripActions.setAssignmentTimes(tripId, dayId, id, times)}
+          onPlaceClick={(placeId, assignmentId) => { planView.choose('map'); handlePlaceClick(placeId, assignmentId) }} />}
 
         {activeTab === 'tour-planner' && enabledAddons.tours && !isMobile && (
           <TourGpxDropZone gpxImport={tourGpxImport} canEdit={canPlaceEdit} className="absolute inset-0">
@@ -936,42 +944,5 @@ function TripPlannerPageDesktop(): React.ReactElement | null {
         confirmLabel={t('roadtrip.stay.releaseAction')}
       />
     </div>
-  )
-}
-
-interface PanelTabProps {
-  hidden: boolean
-  label: string
-  onToggle: () => void
-  side?: 'left' | 'right'
-}
-
-/**
- * A side panel's tab: a flap on its edge while open, a raised accent tile once it is tucked away.
- * One component for both panels in every view, so each states whether its panel is open and shows a focus ring.
- */
-export function PanelTab({ hidden, label, onToggle, side = 'left' }: PanelTabProps): React.ReactElement {
-  const look = hidden ? 'bg-accent text-accent-text shadow-md hover:opacity-90' : 'text-content-faint hover:text-content'
-  const left = side === 'left'
-  const [Open, Close] = left ? [PanelLeftOpen, PanelLeftClose] : [PanelRightOpen, PanelRightClose]
-  return (
-    <Tooltip label={label} placement={left ? 'right' : 'left'}>
-      <button type="button" onClick={onToggle}
-        aria-label={label}
-        aria-expanded={!hidden}
-        className={`${look} focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent`}
-        style={{
-          position: hidden ? 'fixed' : 'absolute', top: hidden ? 'calc(var(--nav-h) + 44px + 14px)' : 14,
-          ...(left
-            ? { left: hidden ? 10 : undefined, right: hidden ? undefined : -28 }
-            : { right: hidden ? 10 : undefined, left: hidden ? undefined : -28 }),
-          zIndex: -1,
-          width: 36, height: 36, borderRadius: hidden ? 10 : left ? '0 10px 10px 0' : '10px 0 0 10px',
-          background: hidden ? undefined : 'var(--sidebar-bg)', backdropFilter: 'blur(20px)', WebkitBackdropFilter: 'blur(20px)',
-          border: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', transition: 'color 0.15s',
-        }}>
-        {hidden ? <Open size={16} /> : <Close size={16} />}
-      </button>
-    </Tooltip>
   )
 }
