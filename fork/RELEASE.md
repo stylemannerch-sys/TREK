@@ -26,7 +26,9 @@ fork's commits are re-applied on every upstream release.
 
 1. **Test locally** with the new version (see *Local test* below).
 2. **Major TREK version** (e.g. 5 → 6)? Take an hPanel snapshot first
-   (VPS → Snapshots & Backups → Create snapshot; it replaces the old one).
+   (VPS → Snapshots & Backups → Create snapshot; it replaces the old one and
+   expires after about a day, so take it right before deploying). The
+   `data.bak-*` folders the deploy script makes are the lasting backups.
 3. **Deploy** in the hPanel browser terminal:
 
    ```sh
@@ -38,6 +40,9 @@ fork's commits are re-applied on every upstream release.
    answers healthy. **If it does not, it rolls back by itself** (image and
    data) and keeps the failed attempt in `data.failed-<time>`.
 4. **Check** https://fantastic4.tech: log in, open a trip, try Map | Focus.
+   Browsers keep running the previous app (TREK is a PWA) until every TREK
+   tab is closed, or until TREK offers its update. Close all TREK tabs and
+   open it again, on phones too; until then the new features do not show.
 
 ## Rollback
 
@@ -90,3 +95,9 @@ done
 Switch back to TREK's own image of the same version, which keeps your data:
 `/root/trek-deploy.sh official <version>`. If TREK adopts focus mode
 upstream, that is all it takes.
+
+## Log
+
+| Date | Change | Data backup |
+|---|---|---|
+| 2026-10-27 | `mauriceboe/trek:latest` (4.3.4) → `5.0.0-focus-61e1e59` (TREK 5.0 + focus mode) | `/root/TREK/data.bak-20261027-100023` |
