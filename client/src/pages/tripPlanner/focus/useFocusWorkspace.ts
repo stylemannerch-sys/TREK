@@ -1,6 +1,7 @@
 import { useCallback, useMemo, useState } from 'react';
 
 import type { Accommodation, AssignmentsMap, Category, Day, Place, Reservation } from '../../../types';
+import type { FocusDrop } from './focusDrag';
 import {
   buildDayRows,
   categoryCounts,
@@ -8,20 +9,28 @@ import {
   dayAnchors,
   dayLoad,
   dayStays,
+  type DayWindow,
   DEFAULT_STOP_MINUTES,
   type FocusGap,
   type FocusRow,
   type FocusStop,
   type FreeSlot,
   freeSlots,
-  type TrayFilter,
+  type Point,
+  reorderIds,
+  sortedIds,
   trayPlaces,
   unplannedPlaces,
 } from './focusModel';
+import { useDayWindow } from './useDayWindow';
 
 export type AgendaFilter = 'all' | 'free' | number;
 
+/** A gap is filled from a short list; the Places panel beside it has the whole trip. */
+const GAP_CHOICES = 8;
+
 export interface FocusWorkspaceInput {
+  tripId: number | string;
   days: Day[];
   places: Place[];
   categories: Category[];
@@ -32,18 +41,26 @@ export interface FocusWorkspaceInput {
   canEdit: boolean;
   onSelectDay: (dayId: number) => void;
   onAssignToDay: (placeId: number, dayId?: number, position?: number) => Promise<boolean | undefined> | boolean | void;
-  onSetTimes: (dayId: number, assignmentId: number, times: { place_time: string; end_time: string }) => Promise<void>;
+  onSetTimes: (
+    dayId: number,
+    assignmentId: number,
+    times: { place_time: string | null; end_time: string | null }
+  ) => Promise<void>;
+  onMoveToDay: (assignmentId: number, fromDayId: number, toDayId: number, position?: number) => Promise<void> | void;
+  onReorder: (dayId: number, orderedIds: number[]) => void;
   onPlaceClick: (placeId: number, assignmentId?: number) => void;
+  /** Pixels the planner's Places panel takes at the end of the stage; the workspace leaves them free. */
+  reserveEnd?: number;
 }
 
-/** Everything the workspace derives from the trip, recomputed only when the trip changes. */
-function useFocusData(input: FocusWorkspaceInput) {
+/** Everything the workspace derives from the trip, recomputed only when the trip or the day window changes. */
+function useFocusData(input: FocusWorkspaceInput, window: DayWindow) {
   const { days, places, assignments, reservations, accommodations } = input;
   return useMemo(() => {
     const ordered = days.slice().sort((a, b) => (a.day_number ?? 0) - (b.day_number ?? 0));
     const dayIndex = new Map(ordered.map((d, i) => [d.id, i]));
     const rowsByDay = new Map<number, FocusRow[]>(
-      ordered.map((d) => [d.id, buildDayRows(d.id, assignments[String(d.id)], reservations)])
+      ordered.map((d) => [d.id, buildDayRows(d.id, assignments[String(d.id)], reservations, window)])
     );
     const loads = new Map(ordered.map((d) => [d.id, dayLoad(rowsByDay.get(d.id) ?? [])]));
     return {
@@ -54,7 +71,59 @@ function useFocusData(input: FocusWorkspaceInput) {
       slots: freeSlots(ordered, rowsByDay),
       unplanned: unplannedPlaces(places, assignments, accommodations),
     };
-  }, [days, places, assignments, reservations, accommodations]);
+  }, [days, places, assignments, reservations, accommodations, window]);
+}
+
+/** What can go into the picked gap for a search: nearby places that fit it, or any that fit and match. */
+function useGapChoices(unplanned: Place[], anchors: Point[], gap: FocusGap | null) {
+  return useCallback(
+    (text: string) => {
+      if (!gap) return [];
+      const { near, elsewhere } = trayPlaces(unplanned, anchors, { text, categoryId: null }, gap);
+      return [...near, ...elsewhere].slice(0, GAP_CHOICES);
+    },
+    [unplanned, anchors, gap]
+  );
+}
+
+/**
+ * Changes made in the agenda, through the planner's own handlers: a drop of a
+ * place or a stop at a slot of a day (or at its end), a stop's times, and a
+ * stop moved to another day.
+ */
+function useFocusEdits(input: FocusWorkspaceInput) {
+  const { assignments, onAssignToDay, onMoveToDay, onReorder, onSetTimes } = input;
+  const dropAt = useCallback(
+    (dayId: number, position: number | undefined, drop: FocusDrop) => {
+      if (drop.kind === 'place') {
+        void onAssignToDay(drop.placeId, dayId, position);
+      } else if (drop.fromDayId !== dayId) {
+        void onMoveToDay(drop.assignmentId, drop.fromDayId, dayId, position);
+      } else {
+        const ids = sortedIds(assignments[String(dayId)]);
+        const next = reorderIds(ids, drop.assignmentId, position ?? ids.length);
+        if (next.some((id, i) => id !== ids[i])) onReorder(dayId, next);
+      }
+    },
+    [assignments, onAssignToDay, onMoveToDay, onReorder]
+  );
+  const setStopTimes = useCallback(
+    (dayId: number, stop: FocusStop, start: number | null, end: number | null) => {
+      if (stop.assignmentId < 0) return;
+      void onSetTimes(dayId, stop.assignmentId, {
+        place_time: start != null ? clock(start) : null,
+        end_time: start != null && end != null && end > start ? clock(end) : null,
+      });
+    },
+    [onSetTimes]
+  );
+  const moveStop = useCallback(
+    (fromDayId: number, stop: FocusStop, toDayId: number) => {
+      if (toDayId !== fromDayId) void onMoveToDay(stop.assignmentId, fromDayId, toDayId);
+    },
+    [onMoveToDay]
+  );
+  return { dropAt, setStopTimes, moveStop };
 }
 
 /**
@@ -65,11 +134,11 @@ function useFocusData(input: FocusWorkspaceInput) {
  */
 export function useFocusWorkspace(input: FocusWorkspaceInput) {
   const { categories, accommodations, assignments, selectedDayId, onSelectDay, onAssignToDay, onSetTimes } = input;
-  const data = useFocusData(input);
+  const edits = useFocusEdits(input);
+  const dayWindow = useDayWindow(input.tripId);
+  const data = useFocusData(input, dayWindow.window);
   const [agendaFilter, setAgendaFilter] = useState<AgendaFilter>('all');
-  const [trayFilter, setTrayFilter] = useState<TrayFilter>('near');
   const [gapKey, setGapKey] = useState<string | null>(null);
-  const [trayOpen, setTrayOpen] = useState(false);
 
   const day = data.ordered.find((d) => d.id === selectedDayId) ?? data.ordered[0] ?? null;
   const rows = useMemo(() => (day ? (data.rowsByDay.get(day.id) ?? []) : []), [data, day]);
@@ -79,22 +148,11 @@ export function useFocusWorkspace(input: FocusWorkspaceInput) {
   const gap = (gapKey && rows.find((r): r is FocusGap => r.kind === 'gap' && r.key === gapKey)) || null;
   const visibleRows =
     typeof activeFilter === 'number' ? rows.filter((r) => r.kind === 'stop' && r.categoryId === activeFilter) : rows;
-
   const anchors = useMemo(
     () => (day ? dayAnchors(day, data.dayIndex, assignments[String(day.id)], accommodations) : []),
     [day, data.dayIndex, assignments, accommodations]
   );
-  const tray = useMemo(
-    () => trayPlaces(data.unplanned, anchors, trayFilter, gap),
-    [data.unplanned, anchors, trayFilter, gap]
-  );
-  const nearCount = useMemo(() => trayPlaces(data.unplanned, anchors, 'near', null).length, [data.unplanned, anchors]);
-  const trayCategories = useMemo(() => {
-    const byId = new Map<number, number>();
-    for (const p of data.unplanned)
-      if (p.category_id != null) byId.set(p.category_id, (byId.get(p.category_id) ?? 0) + 1);
-    return categories.filter((c) => byId.has(c.id)).map((c) => ({ category: c, count: byId.get(c.id) ?? 0 }));
-  }, [data.unplanned, categories]);
+  const gapChoices = useGapChoices(data.unplanned, anchors, gap);
   const dayCategories = categories
     .filter((c) => counts.has(c.id))
     .map((c) => ({ category: c, count: counts.get(c.id) ?? 0 }));
@@ -104,7 +162,6 @@ export function useFocusWorkspace(input: FocusWorkspaceInput) {
     (dayId: number) => {
       onSelectDay(dayId);
       setGapKey(null);
-      setTrayFilter('near');
       setAgendaFilter((f) => (f === 'free' ? 'all' : f));
     },
     [onSelectDay]
@@ -113,21 +170,11 @@ export function useFocusWorkspace(input: FocusWorkspaceInput) {
     (slot: FreeSlot) => {
       onSelectDay(slot.dayId);
       setAgendaFilter('all');
-      setTrayFilter('near');
       setGapKey(slot.gap?.key ?? null);
-      setTrayOpen(true);
     },
     [onSelectDay]
   );
-  const toggleGap = useCallback((key: string) => {
-    setGapKey((k) => (k === key ? null : key));
-    setTrayOpen(true);
-  }, []);
-  const chooseTrayFilter = useCallback((f: TrayFilter) => {
-    setTrayFilter(f);
-    setGapKey(null);
-  }, []);
-
+  const toggleGap = useCallback((key: string) => setGapKey((k) => (k === key ? null : key)), []);
   const addPlace = useCallback(
     async (placeId: number) => {
       if (!day) return;
@@ -159,19 +206,15 @@ export function useFocusWorkspace(input: FocusWorkspaceInput) {
     agendaFilter: activeFilter,
     setAgendaFilter,
     dayCategories,
+    dayWindow,
     gap,
     toggleGap,
+    clearGap: () => setGapKey(null),
     pickSlot,
     selectDay,
-    tray,
-    trayFilter,
-    chooseTrayFilter,
-    trayCategories,
-    nearCount,
-    unplannedCount: data.unplanned.length,
-    trayOpen,
-    setTrayOpen,
+    gapChoices,
     addPlace,
+    ...edits,
     applySuggestion,
     categoryById,
   };

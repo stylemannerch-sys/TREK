@@ -1,5 +1,5 @@
 /**
- * FE-PLANNER-FOCUS-001 to FE-PLANNER-FOCUS-009
+ * FE-PLANNER-FOCUS-001 to FE-PLANNER-FOCUS-016
  *
  * The focus face of the desktop Plan tab: the Map | Focus switch, the trip
  * rail, one day as an agenda with travel and free gaps, the trip's free
@@ -50,14 +50,17 @@ const handlers = {
   onAssignToDay: vi.fn(async () => true),
   onSetTimes: vi.fn(async () => undefined),
   onPlaceClick: vi.fn(),
+  onMoveToDay: vi.fn(),
+  onReorder: vi.fn(),
 };
 
-function Harness({ available = true }: { available?: boolean }) {
+function Harness({ available = true, pickedPlaceId = null }: { available?: boolean; pickedPlaceId?: number | null }) {
   const view = usePlanView(available);
   const [selectedDayId, setSelectedDayId] = useState<number | null>(10);
   return (
     <PlanFocusLayer
       view={view}
+      tripId={1}
       days={days}
       places={[temple, lunch, untimed, ramen, osaka]}
       categories={categories}
@@ -73,6 +76,10 @@ function Harness({ available = true }: { available?: boolean }) {
       onAssignToDay={handlers.onAssignToDay}
       onSetTimes={handlers.onSetTimes}
       onPlaceClick={handlers.onPlaceClick}
+      onMoveToDay={handlers.onMoveToDay}
+      onReorder={handlers.onReorder}
+      reserveEnd={300}
+      selectedPlaceId={pickedPlaceId}
     />
   );
 }
@@ -89,7 +96,18 @@ const agenda = () =>
   screen
     .getByRole('heading', { level: 2, name: /dayplan\.dayN|trip\.focus\.freeSlotsTitle/ })
     .closest('section') as HTMLElement;
-const tray = () => screen.getByRole('complementary', { name: 'trip.focus.trayTitle' });
+
+/** A drag as the browser hands it to a drop target: its types while moving, its data on drop. */
+function dragOf(data: Record<string, string>) {
+  return { types: Object.keys(data), getData: (type: string) => data[type] ?? '', dropEffect: 'none' };
+}
+const placeDrag = (placeId: number) => dragOf({ placeId: String(placeId) });
+const stopDrag = (assignmentId: number, fromDayId: number) =>
+  dragOf({ 'application/x-trek-focus-stop': JSON.stringify({ assignmentId, fromDayId }) });
+function dropOn(target: HTMLElement, dataTransfer: ReturnType<typeof dragOf>) {
+  fireEvent.dragOver(target, { dataTransfer });
+  fireEvent.drop(target, { dataTransfer });
+}
 
 describe('PlanFocusLayer', () => {
   beforeEach(() => {
@@ -131,29 +149,34 @@ describe('PlanFocusLayer', () => {
     expect(within(day).getByRole('button', { name: 'Temple' })).toBeInTheDocument();
     expect(within(day).getByText('09:00')).toBeInTheDocument();
     expect(within(day).getAllByText('trip.focus.walk').length).toBeGreaterThan(0);
-    expect(within(day).getByRole('button', { name: /trip\.focus\.fillGap/ })).toBeInTheDocument();
+    expect(within(day).getAllByRole('button', { name: /trip\.focus\.fillGap/ }).length).toBeGreaterThan(0);
     fireEvent.click(within(day).getByRole('button', { name: 'Lunch' }));
     expect(handlers.onPlaceClick).toHaveBeenCalledWith(22, 2);
   });
 
-  it('FE-PLANNER-FOCUS-005: picking a gap narrows the tray to what fits and adds into the gap', () => {
+  it('FE-PLANNER-FOCUS-005: picking a gap opens a picker under it with what fits nearby, and adds into the gap', () => {
     setup();
-    expect(within(tray()).getByText('Ramen')).toBeInTheDocument();
-    expect(within(tray()).queryByText('Osaka castle')).toBeNull();
-    fireEvent.click(within(agenda()).getByRole('button', { name: /trip\.focus\.fillGap/ }));
-    expect(within(tray()).getByText('trip.focus.gapHint')).toBeInTheDocument();
-    fireEvent.click(within(tray()).getByRole('button', { name: 'trip.focus.addToAria' }));
+    expect(screen.queryByText('trip.focus.gapHint')).toBeNull();
+    fireEvent.click(within(agenda()).getAllByRole('button', { name: /trip\.focus\.fillGap/ })[0]);
+    expect(within(agenda()).getByText('trip.focus.gapHint')).toBeInTheDocument();
+    expect(within(agenda()).getByText('Ramen')).toBeInTheDocument();
+    expect(within(agenda()).queryByText('Osaka castle')).toBeNull();
+    fireEvent.click(within(agenda()).getByRole('button', { name: 'trip.focus.addToAria' }));
     expect(handlers.onAssignToDay).toHaveBeenCalledWith(23, 10, 1);
   });
 
-  it('FE-PLANNER-FOCUS-006: the tray filters by category and shows all places', () => {
+  it('FE-PLANNER-FOCUS-006: a search in the gap picker reaches places further away that still fit', () => {
     setup();
-    fireEvent.click(within(tray()).getByRole('button', { name: /Sights · 1/ }));
-    expect(within(tray()).getByText('Osaka castle')).toBeInTheDocument();
-    expect(within(tray()).queryByText('Ramen')).toBeNull();
-    fireEvent.click(within(tray()).getByRole('button', { name: /common\.all/ }));
-    expect(within(tray()).getByText('Ramen')).toBeInTheDocument();
-    expect(within(tray()).getByText('Osaka castle')).toBeInTheDocument();
+    fireEvent.click(within(agenda()).getAllByRole('button', { name: /trip\.focus\.fillGap/ })[0]);
+    fireEvent.change(within(agenda()).getByRole('searchbox', { name: 'places.search' }), {
+      target: { value: 'osaka' },
+    });
+    expect(within(agenda()).getByText('Osaka castle')).toBeInTheDocument();
+    expect(within(agenda()).queryByText('Ramen')).toBeNull();
+    fireEvent.change(within(agenda()).getByRole('searchbox', { name: 'places.search' }), {
+      target: { value: 'nothing like it' },
+    });
+    expect(within(agenda()).getByText('trip.focus.trayEmptyGap')).toBeInTheDocument();
   });
 
   it('FE-PLANNER-FOCUS-007: a category chip narrows the day, and the whole day comes back', () => {
@@ -169,9 +192,10 @@ describe('PlanFocusLayer', () => {
     setup();
     fireEvent.click(within(agenda()).getByRole('button', { name: /trip\.focus\.freeSlots/ }));
     const slots = within(agenda()).getAllByRole('button', { name: /trip\.focus\.fill$/ });
-    expect(slots).toHaveLength(2);
+    expect(slots).toHaveLength(3);
+    expect(within(agenda()).getByText('trip.focus.freeAfter')).toBeInTheDocument();
     expect(within(agenda()).getByText('trip.focus.wholeDayFree')).toBeInTheDocument();
-    fireEvent.click(slots[1]);
+    fireEvent.click(slots[2]);
     expect(handlers.onSelectDay).toHaveBeenCalledWith(11);
   });
 
@@ -183,5 +207,75 @@ describe('PlanFocusLayer', () => {
       3,
       expect.objectContaining({ place_time: expect.stringMatching(/^14:\d\d$/) })
     );
+  });
+
+  it('FE-PLANNER-FOCUS-010: the workspace leaves the width of the Places panel free beside it', () => {
+    setup();
+    const workspace = screen.getByRole('navigation', { name: 'trip.focus.days' }).parentElement as HTMLElement;
+    expect(workspace.style.paddingRight).toBe('326px');
+  });
+
+  it('FE-PLANNER-FOCUS-011: the day window says what free time counts against, and an earlier start opens the morning', () => {
+    setup();
+    const before = within(agenda()).getAllByRole('button', { name: /trip\.focus\.fillGap/ }).length;
+    expect(within(agenda()).getByText('trip.focus.dayWindow')).toBeInTheDocument();
+    fireEvent.click(within(agenda()).getByRole('button', { name: 'common.change' }));
+    fireEvent.change(within(agenda()).getByLabelText('trip.focus.dayStart'), { target: { value: '07:30' } });
+    expect(within(agenda()).getAllByRole('button', { name: /trip\.focus\.fillGap/ })).toHaveLength(before + 1);
+    expect(JSON.parse(localStorage.getItem('plannerDayWindow:1') ?? '{}')).toMatchObject({ start: 450 });
+  });
+
+  it('FE-PLANNER-FOCUS-012: a place picked in the Places panel opens on the map, one already open does not', () => {
+    const { rerender } = render(
+      <MemoryRouter initialEntries={['/trips/1?view=focus']}>
+        <Harness pickedPlaceId={21} />
+      </MemoryRouter>
+    );
+    expect(screen.getByRole('navigation', { name: 'trip.focus.days' })).toBeInTheDocument();
+    rerender(
+      <MemoryRouter initialEntries={['/trips/1?view=focus']}>
+        <Harness pickedPlaceId={23} />
+      </MemoryRouter>
+    );
+    expect(screen.queryByRole('navigation', { name: 'trip.focus.days' })).toBeNull();
+    expect(screen.getByRole('button', { name: /trip\.focus\.viewMap/ })).toHaveAttribute('aria-pressed', 'true');
+  });
+
+  it('FE-PLANNER-FOCUS-013: a place dragged from the Places panel onto a gap lands in it', () => {
+    setup();
+    const gap = within(agenda()).getAllByRole('button', { name: /trip\.focus\.fillGap/ })[0]
+      .parentElement as HTMLElement;
+    dropOn(gap, placeDrag(23));
+    expect(handlers.onAssignToDay).toHaveBeenCalledWith(23, 10, 1);
+  });
+
+  it('FE-PLANNER-FOCUS-014: a stop dropped on another day of the rail moves there, on a gap of its day it is reordered', () => {
+    setup();
+    const rail = screen.getByRole('navigation', { name: 'trip.focus.days' });
+    dropOn(within(rail).getAllByRole('button')[1], stopDrag(1, 10));
+    expect(handlers.onMoveToDay).toHaveBeenCalledWith(1, 10, 11, undefined);
+    const gap = within(agenda()).getAllByRole('button', { name: /trip\.focus\.fillGap/ })[0]
+      .parentElement as HTMLElement;
+    dropOn(gap, stopDrag(3, 10));
+    expect(handlers.onReorder).toHaveBeenCalledWith(10, [1, 3, 2]);
+  });
+
+  it('FE-PLANNER-FOCUS-015: the end of the day takes a drop, onto the end of the day', () => {
+    setup();
+    dropOn(within(agenda()).getByText('trip.focus.dropHere'), placeDrag(24));
+    expect(handlers.onAssignToDay).toHaveBeenCalledWith(24, 10, undefined);
+  });
+
+  it('FE-PLANNER-FOCUS-016: a stop time is changed in place, and the editor can move it to another day', () => {
+    setup();
+    fireEvent.click(within(agenda()).getAllByRole('button', { name: 'trip.focus.editTime' })[0]);
+    fireEvent.change(within(agenda()).getByLabelText('trip.focus.start'), { target: { value: '08:30' } });
+    fireEvent.change(within(agenda()).getByLabelText('trip.focus.dayLabel'), { target: { value: '11' } });
+    fireEvent.click(within(agenda()).getByRole('button', { name: 'common.save' }));
+    expect(handlers.onSetTimes).toHaveBeenCalledWith(10, 1, { place_time: '08:30', end_time: '10:00' });
+    expect(handlers.onMoveToDay).toHaveBeenCalledWith(1, 10, 11);
+    fireEvent.click(within(agenda()).getAllByRole('button', { name: 'trip.focus.editTime' })[1]);
+    fireEvent.click(within(agenda()).getByRole('button', { name: 'trip.focus.removeTime' }));
+    expect(handlers.onSetTimes).toHaveBeenLastCalledWith(10, 2, { place_time: null, end_time: null });
   });
 });

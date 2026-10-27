@@ -1,19 +1,26 @@
 import { LayoutList, Map as MapIcon } from 'lucide-react';
+import { useEffect, useRef } from 'react';
 
 import { useTranslation } from '../../../i18n';
 import { FocusDayAgenda } from './FocusDayAgenda';
 import { FocusTripRail } from './FocusTripRail';
-import { FocusUnplannedTray } from './FocusUnplannedTray';
 import { type FocusWorkspaceInput, useFocusWorkspace } from './useFocusWorkspace';
 import type { PlanView } from './usePlanView';
 
+/**
+ * The rail and the agenda. The planner's own Places panel stays beside them
+ * where it always sits, so the workspace leaves its width free.
+ */
 function FocusWorkspace(props: FocusWorkspaceInput) {
   const ws = useFocusWorkspace(props);
+  const reserve = props.reserveEnd ? props.reserveEnd + 26 : 16;
   return (
-    <div className="absolute inset-0 z-20 flex gap-4 bg-surface-secondary p-4 pb-20">
-      <FocusTripRail ws={ws} />
+    <div
+      className="absolute inset-0 z-20 flex gap-4 bg-surface-secondary p-4 pb-20"
+      style={{ paddingRight: reserve }} // rtl-lint-disable: the Places panel is placed by a physical right offset
+    >
+      <FocusTripRail ws={ws} canEdit={props.canEdit} />
       <FocusDayAgenda ws={ws} canEdit={props.canEdit} onPlaceClick={props.onPlaceClick} />
-      <FocusUnplannedTray ws={ws} canEdit={props.canEdit} />
     </div>
   );
 }
@@ -51,11 +58,30 @@ function PlanViewSwitch({ view }: { view: PlanView }) {
 }
 
 /**
+ * A place picked in the Places panel opens its details, which live on the map:
+ * so a pick made while focus is on goes back to the map, as a stop opened from
+ * the agenda does. Only a new pick counts, not one already open on arrival.
+ */
+function useMapForPickedPlace(view: PlanView, selectedPlaceId: number | null | undefined) {
+  const seen = useRef(selectedPlaceId);
+  const { active, choose } = view;
+  useEffect(() => {
+    if (active && selectedPlaceId != null && selectedPlaceId !== seen.current) choose('map');
+    seen.current = selectedPlaceId;
+  }, [active, choose, selectedPlaceId]);
+}
+
+/**
  * The focus face of the desktop Plan tab and the switch between it and the map.
  * The map stays mounted underneath (hidden, not removed), so it keeps its view
  * and needs no rebuild when the planner comes back to it.
  */
-export function PlanFocusLayer({ view, ...input }: FocusWorkspaceInput & { view: PlanView }) {
+export function PlanFocusLayer({
+  view,
+  selectedPlaceId,
+  ...input
+}: FocusWorkspaceInput & { view: PlanView; selectedPlaceId?: number | null }) {
+  useMapForPickedPlace(view, selectedPlaceId);
   if (!view.available) return null;
   return (
     <>

@@ -411,7 +411,7 @@ function TripPlannerPageDesktop(): React.ReactElement | null {
               </div>
             </div>
 
-            <div className="hidden md:block" style={{ position: 'absolute', right: 10, top: 10, bottom: 10, zIndex: 20 }}>
+            <div className="hidden md:block" style={{ position: 'absolute', right: 10, top: 10, bottom: 10, zIndex: planView.active ? 30 : 20, visibility: planView.active ? 'visible' : undefined }}>
               <PanelTab side="right" hidden={rightHidden} label={rightHidden ? t('trip.mobilePlaces') : t('common.collapse')} onToggle={toggleRight} />
 
               <div style={{
@@ -621,10 +621,9 @@ function TripPlannerPageDesktop(): React.ReactElement | null {
             )}
           </div>
         )}
-        {activeTab === 'plan' && <PlanFocusLayer view={planView} days={days} places={places} categories={categories} assignments={storedAssignments}
-          reservations={reservations} accommodations={tripAccommodations} selectedDayId={selectedDayId} canEdit={can('day_edit', trip)} onSelectDay={handleSelectDay}
-          onAssignToDay={handleAssignToDay} onSetTimes={(dayId, id, times) => tripActions.setAssignmentTimes(tripId, dayId, id, times)}
-          onPlaceClick={(placeId, assignmentId) => { planView.choose('map'); handlePlaceClick(placeId, assignmentId) }} />}
+        {activeTab === 'plan' && <PlanFocusLayer view={planView} tripId={tripId} days={days} places={places} categories={categories} assignments={storedAssignments} reservations={reservations} accommodations={tripAccommodations}
+          selectedDayId={selectedDayId} canEdit={can('day_edit', trip)} onSelectDay={handleSelectDay} onAssignToDay={handleAssignToDay} onSetTimes={(dayId, id, times) => tripActions.setAssignmentTimes(tripId, dayId, id, times)}
+          onPlaceClick={(placeId, assignmentId) => { planView.choose('map'); handlePlaceClick(placeId, assignmentId) }} reserveEnd={rightPanelPx} selectedPlaceId={selectedPlaceId} onMoveToDay={handleMoveToDay} onReorder={handleReorder} />}
 
         {activeTab === 'tour-planner' && enabledAddons.tours && !isMobile && (
           <TourGpxDropZone gpxImport={tourGpxImport} canEdit={canPlaceEdit} className="absolute inset-0">

@@ -32,7 +32,11 @@ export function FocusFreeSlots({ ws }: { ws: FocusWorkspaceState }) {
               </div>
               <div className="truncate text-caption text-content-muted">
                 {gap
-                  ? t('trip.focus.between', { after: gap.afterName, before: gap.beforeName })
+                  ? gap.afterName && gap.beforeName
+                    ? t('trip.focus.between', { after: gap.afterName, before: gap.beforeName })
+                    : gap.beforeName
+                      ? t('trip.focus.freeBefore', { before: gap.beforeName })
+                      : t('trip.focus.freeAfter', { after: gap.afterName })
                   : entry.day.title || fmt.date(entry.day.date, 'full')}
               </div>
             </div>

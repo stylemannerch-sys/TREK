@@ -28,6 +28,8 @@ export interface FocusStop {
   /** For an untimed stop that follows a timed one: when it would start, travel included. */
   suggested: number | null;
   booked: boolean;
+  /** Its index in the day's order. */
+  position: number;
 }
 
 export interface FocusLeg {
@@ -94,6 +96,11 @@ function sortedAssignments(list: readonly Assignment[] | undefined): Assignment[
   return (list ?? []).slice().sort((a, b) => a.order_index - b.order_index);
 }
 
+/** A day's assignment ids in the order it shows them. */
+export function sortedIds(list: readonly Assignment[] | undefined): number[] {
+  return sortedAssignments(list).map((a) => a.id);
+}
+
 function stopOf(a: Assignment, dayId: number, reservations: readonly Reservation[]): FocusStop {
   const start = parseTimeToMinutes(a.place.place_time);
   const endTime = parseTimeToMinutes(a.place.end_time);
@@ -111,48 +118,73 @@ function stopOf(a: Assignment, dayId: number, reservations: readonly Reservation
     end: start != null ? start + (minutes ?? DEFAULT_STOP_MINUTES) : null,
     minutes,
     suggested: null,
+    position: 0,
     booked: reservations.some((r) => r.place_id === a.place_id && (r.day_id == null || r.day_id === dayId)),
   };
 }
 
+/** The part of a day the traveller plans with, in minutes after midnight. */
+export interface DayWindow {
+  start: number;
+  end: number;
+}
+
+export const DEFAULT_DAY_WINDOW: DayWindow = { start: 9 * 60, end: 21 * 60 };
+
 /**
  * A day as the focus agenda reads it: its stops in order, the travel between
  * two located stops, and a gap wherever an hour or more stays free between two
- * timed ones. A stop without a time gets a suggested start from the one before.
+ * timed ones, or between the day's window and its first or last timed stop.
+ * A stop without a time gets a suggested start from the one before.
  */
+interface PrevStop {
+  stop: FocusStop;
+  point: Point | null;
+  end: number | null;
+}
+
+const gapRow = (key: string, from: number, to: number, position: number, [afterName, beforeName]: [string, string]) =>
+  to - from >= MIN_GAP_MINUTES ? ({ kind: 'gap', key, from, to, position, afterName, beforeName } as FocusGap) : null;
+
+/** Free time between the stop before and this one, ending where the (estimated) travel to it starts. */
+function gapBefore(prev: PrevStop | null, stop: FocusStop, leg: { minutes: number } | null, position: number) {
+  if (!prev || prev.end == null || stop.start == null) return null;
+  // The travel is an estimate, so the free time it leaves is read on a 5-minute grid, never later than it is.
+  const leaveBy = floorTo5(stop.start - (leg?.minutes ?? 0));
+  return gapRow(`g${stop.assignmentId}`, prev.end, leaveBy, position, [prev.stop.name, stop.name]);
+}
+
 export function buildDayRows(
   dayId: number,
   assignments: readonly Assignment[] | undefined,
-  reservations: readonly Reservation[]
+  reservations: readonly Reservation[],
+  window: DayWindow = DEFAULT_DAY_WINDOW
 ): FocusRow[] {
   const ordered = sortedAssignments(assignments);
   const rows: FocusRow[] = [];
-  let prev: { stop: FocusStop; point: Point | null; end: number | null } | null = null;
+  let prev: PrevStop | null = null;
   ordered.forEach((a, index) => {
-    const stop = stopOf(a, dayId, reservations);
+    const stop = { ...stopOf(a, dayId, reservations), position: index };
+    const morning =
+      index === 0 && stop.start != null
+        ? gapRow(`gs${a.id}`, window.start, floorTo5(stop.start), 0, ['', stop.name])
+        : null;
     const point = pointOf(a.place);
     const leg = prev?.point && point ? estimateLeg(prev.point, point) : null;
-    const prevEnd = prev?.end ?? null;
-    const arrival = prevEnd != null ? prevEnd + (leg?.minutes ?? 0) : null;
-    // The travel is an estimate, so the free time it leaves is read on a 5-minute grid, never later than it is.
-    const leaveBy = stop.start != null ? floorTo5(stop.start - (leg?.minutes ?? 0)) : null;
-    if (prev && prevEnd != null && leaveBy != null && leaveBy - prevEnd >= MIN_GAP_MINUTES) {
-      rows.push({
-        kind: 'gap',
-        key: `g${a.id}`,
-        from: prevEnd,
-        to: leaveBy,
-        position: index,
-        afterName: prev.stop.name,
-        beforeName: stop.name,
-      });
-    }
+    const between = gapBefore(prev, stop, leg, index);
+    for (const gap of [morning, between]) if (gap) rows.push(gap);
     if (leg) rows.push({ kind: 'leg', key: `l${a.id}`, ...leg });
-    if (stop.start == null && arrival != null) stop.suggested = ceilTo5(arrival);
+    if (stop.start == null && prev?.end != null) stop.suggested = ceilTo5(prev.end + (leg?.minutes ?? 0));
     rows.push(stop);
     const startsAt = stop.start ?? stop.suggested;
     prev = { stop, point, end: startsAt != null ? startsAt + (stop.minutes ?? DEFAULT_STOP_MINUTES) : null };
   });
+  const last = prev as PrevStop | null;
+  const evening =
+    last?.end != null
+      ? gapRow(`ge${last.stop.assignmentId}`, ceilTo5(last.end), window.end, ordered.length, [last.stop.name, ''])
+      : null;
+  if (evening) rows.push(evening);
   return rows;
 }
 
@@ -234,36 +266,48 @@ export function unplannedPlaces(
   return places.filter((p) => !used.has(p.id));
 }
 
-export type TrayFilter = 'near' | 'all' | number;
-
 export interface TrayPlace {
   place: Place;
   /** Kilometres to the nearest stop or hotel of the day; null without coordinates on either side. */
   km: number | null;
-  near: boolean;
+}
+
+export interface TrayQuery {
+  /** Matched against the name and address, case- and accent-blind. */
+  text: string;
+  categoryId: number | null;
+}
+
+function fold(s: string): string {
+  return s.normalize('NFD').replace(/\p{M}/gu, '').toLowerCase();
 }
 
 /**
- * The unplanned places the tray shows for a day: near it, all, or one category,
- * and with a gap picked only the near ones that fit it. Nearest first, then by name.
+ * The unplanned places the tray shows for a day, split into the ones near it
+ * (nearest first) and the rest of the trip (by name), both narrowed by search
+ * text and category. With a gap picked, only what fits it: the near ones, or any a search finds.
  */
 export function trayPlaces(
   unplanned: readonly Place[],
   anchors: readonly Point[],
-  filter: TrayFilter,
+  query: TrayQuery,
   gap: FocusGap | null
-): TrayPlace[] {
-  const rows = unplanned.map((place) => {
+): { near: TrayPlace[]; elsewhere: TrayPlace[] } {
+  const text = fold(query.text.trim());
+  const near: TrayPlace[] = [];
+  const elsewhere: TrayPlace[] = [];
+  for (const place of unplanned) {
+    if (query.categoryId != null && place.category_id !== query.categoryId) continue;
+    if (text && !fold(`${place.name} ${place.address ?? ''}`).includes(text)) continue;
     const km = distanceToAnchors(place, anchors);
-    return { place, km, near: km != null && km <= NEAR_KM };
-  });
-  const shown = rows.filter((r) => {
-    if (gap) return r.near && fitsGap(r.place, gap);
-    if (filter === 'near') return r.near;
-    if (filter === 'all') return true;
-    return r.place.category_id === filter;
-  });
-  return shown.sort((a, b) => (a.km ?? Infinity) - (b.km ?? Infinity) || a.place.name.localeCompare(b.place.name));
+    const isNear = km != null && km <= NEAR_KM;
+    // For a gap: only what fits it, and only nearby unless a search reaches further.
+    if (gap && (!fitsGap(place, gap) || (!isNear && !text))) continue;
+    (isNear ? near : elsewhere).push({ place, km });
+  }
+  near.sort((a, b) => (a.km ?? 0) - (b.km ?? 0) || a.place.name.localeCompare(b.place.name));
+  elsewhere.sort((a, b) => a.place.name.localeCompare(b.place.name));
+  return { near, elsewhere };
 }
 
 export function fitsGap(place: Place, gap: FocusGap): boolean {
@@ -292,4 +336,17 @@ export function dayStays(
 export function clock(minutes: number): string {
   const m = ((Math.round(minutes) % 1440) + 1440) % 1440;
   return `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
+}
+
+/**
+ * A day's order after one of its stops is dropped at `position`, a slot in the
+ * order as shown (0 = first, the length = last). Dropping it onto its own slot
+ * or the one right after it changes nothing.
+ */
+export function reorderIds(ids: readonly number[], movedId: number, position: number): number[] {
+  const from = ids.indexOf(movedId);
+  if (from < 0) return ids.slice();
+  const rest = ids.filter((id) => id !== movedId);
+  const at = Math.max(0, Math.min(rest.length, position > from ? position - 1 : position));
+  return [...rest.slice(0, at), movedId, ...rest.slice(at)];
 }

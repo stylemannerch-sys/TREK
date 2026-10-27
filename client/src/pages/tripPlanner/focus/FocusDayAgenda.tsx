@@ -1,9 +1,12 @@
-import { BedDouble, ChevronLeft, ChevronRight, Clock, Plus } from 'lucide-react';
+import { BedDouble, ChevronLeft, ChevronRight, Clock } from 'lucide-react';
+import { useState } from 'react';
 
 import { useTranslation } from '../../../i18n';
-import { FocusGapRow, FocusLegRow, FocusStopRow } from './FocusAgendaRows';
+import { FocusDayEndDrop, FocusGapRow, FocusLegRow, FocusStopRow } from './FocusAgendaRows';
 import { FocusChip } from './FocusChip';
 import { FocusFreeSlots } from './FocusFreeSlots';
+import { FocusGapPicker } from './FocusGapPicker';
+import { clock } from './focusModel';
 import { useFocusFormat } from './useFocusFormat';
 import type { FocusWorkspaceState } from './useFocusWorkspace';
 
@@ -53,14 +56,6 @@ function AgendaHeader({ ws }: { ws: FocusWorkspaceState }) {
           onClick={() => go(1)}
         >
           <ChevronRight size={18} aria-hidden className="rtl:-scale-x-100" />
-        </button>
-        <button
-          type="button"
-          onClick={() => ws.setTrayOpen(true)}
-          className="inline-flex min-h-11 items-center gap-1.5 rounded-xl bg-accent px-3 text-body font-semibold text-accent-text lg:hidden"
-        >
-          <Plus size={16} aria-hidden />
-          {t('trip.focus.openTray')}
         </button>
       </div>
       <div role="group" aria-label={t('trip.focus.filterDay')} className="flex flex-wrap gap-1.5 px-6 pb-3">
@@ -128,20 +123,24 @@ function DayRows({ ws, canEdit, onPlaceClick }: FocusDayAgendaProps) {
           <li key={row.key}>
             {row.kind === 'stop' && (
               <FocusStopRow
+                ws={ws}
                 stop={row}
                 category={row.categoryId != null ? ws.categoryById.get(row.categoryId) : undefined}
                 canEdit={canEdit}
                 onOpen={onPlaceClick}
-                onApplySuggestion={ws.applySuggestion}
               />
             )}
             {row.kind === 'leg' && <FocusLegRow leg={row} />}
             {row.kind === 'gap' && (
-              <FocusGapRow gap={row} active={ws.gap?.key === row.key} canEdit={canEdit} onToggle={ws.toggleGap} />
+              <>
+                <FocusGapRow ws={ws} gap={row} canEdit={canEdit} />
+                {canEdit && ws.gap?.key === row.key && <FocusGapPicker ws={ws} gap={row} />}
+              </>
             )}
           </li>
         ))}
       </ol>
+      {!filtered && <FocusDayEndDrop ws={ws} canEdit={canEdit} />}
       {!filtered && ws.stays.night && (
         <StayLine
           text={t('trip.focus.nightAt', { name: ws.stays.night.place_name || ws.stays.night.reservation_title || '' })}
@@ -151,21 +150,78 @@ function DayRows({ ws, canEdit, onPlaceClick }: FocusDayAgendaProps) {
   );
 }
 
+const minutesOf = (value: string) => {
+  const [h, m] = value.split(':').map(Number);
+  return Number.isFinite(h) && Number.isFinite(m) ? h * 60 + m : null;
+};
+
+/** What free time is counted against, said where it shows, and changed in place. */
+function DayWindowLine({ ws }: { ws: FocusWorkspaceState }) {
+  const { t } = useTranslation();
+  const fmt = useFocusFormat();
+  const [editing, setEditing] = useState(false);
+  const { window, change } = ws.dayWindow;
+  const field = (label: string, value: number, apply: (m: number) => void) => (
+    <label className="flex items-center gap-2 text-caption text-content-secondary">
+      {label}
+      <input
+        type="time"
+        step={900}
+        value={clock(value)}
+        onChange={(e) => {
+          const m = minutesOf(e.target.value);
+          if (m != null) apply(m);
+        }}
+        className="rounded-lg border border-edge bg-surface-input px-2 py-1 text-body text-content"
+      />
+    </label>
+  );
+  if (editing) {
+    return (
+      <div className="flex flex-wrap items-center gap-3">
+        {field(t('trip.focus.dayStart'), window.start, (start) => change({ ...window, start }))}
+        {field(t('trip.focus.dayEnd'), window.end, (end) => change({ ...window, end }))}
+        <button
+          type="button"
+          onClick={() => setEditing(false)}
+          className="rounded-lg border border-edge bg-surface-card px-2.5 py-1 text-caption font-semibold text-content"
+        >
+          {t('common.close')}
+        </button>
+      </div>
+    );
+  }
+  return (
+    <div className="flex flex-wrap items-center gap-2 text-caption text-content-muted">
+      <span>{t('trip.focus.dayWindow', { from: fmt.time(window.start), to: fmt.time(window.end) })}</span>
+      <button type="button" onClick={() => setEditing(true)} className="font-semibold text-accent hover:underline">
+        {t('common.change')}
+      </button>
+    </div>
+  );
+}
+
 function DaySummary({ ws }: { ws: FocusWorkspaceState }) {
   const { t } = useTranslation();
   const fmt = useFocusFormat();
-  if (!ws.load || ws.load.stops === 0) return null;
-  const { busy, travel, free } = ws.load;
-  const parts = [
-    t('trip.focus.planned', { time: fmt.duration(busy) }),
-    travel > 0 ? t('trip.focus.travel', { time: fmt.duration(travel) }) : null,
-    free > 0 ? t('trip.focus.free', { time: fmt.duration(free) }) : null,
-  ].filter((p): p is string => p != null);
+  const load = ws.load && ws.load.stops > 0 ? ws.load : null;
+  const parts = load
+    ? [
+        t('trip.focus.planned', { time: fmt.duration(load.busy) }),
+        load.travel > 0 ? t('trip.focus.travel', { time: fmt.duration(load.travel) }) : null,
+        load.free > 0 ? t('trip.focus.free', { time: fmt.duration(load.free) }) : null,
+      ].filter((p): p is string => p != null)
+    : [];
   return (
-    <div className="flex flex-wrap gap-x-6 gap-y-1 rounded-b-2xl border-t border-edge bg-surface-secondary px-6 py-3.5 text-body text-content-secondary">
-      {parts.map((p) => (
-        <span key={p}>{p}</span>
-      ))}
+    <div className="flex flex-col gap-2 rounded-b-2xl border-t border-edge bg-surface-secondary px-6 py-3.5">
+      {parts.length > 0 && (
+        <div className="flex flex-wrap gap-x-6 gap-y-1 text-body text-content-secondary">
+          {parts.map((p) => (
+            <span key={p}>{p}</span>
+          ))}
+        </div>
+      )}
+      <DayWindowLine ws={ws} />
     </div>
   );
 }

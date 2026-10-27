@@ -1,5 +1,5 @@
 /**
- * FE-PLANNER-FOCUSMODEL-001 to FE-PLANNER-FOCUSMODEL-011
+ * FE-PLANNER-FOCUSMODEL-001 to FE-PLANNER-FOCUSMODEL-013
  *
  * The focus workspace's pure model: a day's rows (stops, travel, free gaps),
  * its load, the trip's free slots, and which places are still unplanned and
@@ -19,6 +19,7 @@ import {
   estimateLeg,
   fitsGap,
   freeSlots,
+  reorderIds,
   trayPlaces,
   unplannedPlaces,
   type FocusGap,
@@ -56,6 +57,8 @@ function day(id: number): Day {
 }
 
 const stops = (rows: FocusRow[]) => rows.filter((r) => r.kind === 'stop');
+// A window no stop can leave an hour before or after, for tests about the gaps between stops.
+const NO_EDGES = { start: 1439, end: 0 };
 
 describe('focusModel', () => {
   it('FE-PLANNER-FOCUSMODEL-001: a short hop is a walk, across town is transit', () => {
@@ -75,7 +78,8 @@ describe('focusModel', () => {
         assignment(2, 1, { id: 22, ...PARCO, place_time: '11:00' }),
         assignment(1, 0, { id: 21, ...SHIBUYA, place_time: '10:00' }),
       ],
-      []
+      [],
+      NO_EDGES
     );
     expect(rows.map((r) => r.kind)).toEqual(['stop', 'leg', 'stop']);
     expect(stops(rows).map((s) => s.assignmentId)).toEqual([1, 2]);
@@ -109,7 +113,8 @@ describe('focusModel', () => {
         assignment(2, 1, { id: 22, place_time: '10:45' }),
         assignment(3, 2, { id: 23 }),
       ],
-      []
+      [],
+      NO_EDGES
     );
     expect(rows.some((r) => r.kind === 'gap')).toBe(false);
     const third = stops(rows)[2];
@@ -147,7 +152,8 @@ describe('focusModel', () => {
         buildDayRows(
           1,
           [assignment(1, 0, { id: 21, place_time: '09:00' }), assignment(2, 1, { id: 22, place_time: '14:00' })],
-          []
+          [],
+          NO_EDGES
         ),
       ],
       [2, []],
@@ -212,18 +218,52 @@ describe('focusModel', () => {
     expect(clock(1440 + 30)).toBe('00:30');
   });
 
-  it('FE-PLANNER-FOCUSMODEL-011: the tray shows near places nearest first, all, one category, or what fits a gap', () => {
+  it('FE-PLANNER-FOCUSMODEL-011: the tray splits near (nearest first) from elsewhere (by name), narrowed by text and category', () => {
     const near = place(1, { ...PARCO, name: 'B near', category_id: 2, duration_minutes: 120 });
-    const nearer = place(2, { ...SHIBUYA, name: 'A nearer', category_id: 3 });
+    const nearer = place(2, { ...SHIBUYA, name: 'A nearer', category_id: 3, address: 'Jingūmae, Shibuya' });
     const far = place(3, { lat: 34.69, lng: 135.5, name: 'Osaka', category_id: 2 });
     const unplaced = place(4, { name: 'No coordinates' });
     const anchors = [SHIBUYA];
     const all = [near, nearer, far, unplaced];
+    const ids = (r: { near: { place: Place }[]; elsewhere: { place: Place }[] }) => [
+      r.near.map((x) => x.place.id),
+      r.elsewhere.map((x) => x.place.id),
+    ];
 
-    expect(trayPlaces(all, anchors, 'near', null).map((r) => r.place.id)).toEqual([2, 1]);
-    expect(trayPlaces(all, anchors, 'all', null).map((r) => r.place.id)).toEqual([2, 1, 3, 4]);
-    expect(trayPlaces(all, anchors, 2, null).map((r) => r.place.id)).toEqual([1, 3]);
+    expect(ids(trayPlaces(all, anchors, { text: '', categoryId: null }, null))).toEqual([
+      [2, 1],
+      [4, 3],
+    ]);
+    expect(ids(trayPlaces(all, anchors, { text: '', categoryId: 2 }, null))).toEqual([[1], [3]]);
+    expect(ids(trayPlaces(all, anchors, { text: 'JINGUMAE', categoryId: null }, null))).toEqual([[2], []]);
+    expect(ids(trayPlaces(all, anchors, { text: 'osa', categoryId: null }, null))).toEqual([[], [3]]);
     const gap = { kind: 'gap', key: 'g', from: 600, to: 690, position: 1, afterName: '', beforeName: '' } as FocusGap;
-    expect(trayPlaces(all, anchors, 'all', gap).map((r) => r.place.id)).toEqual([2]);
+    expect(ids(trayPlaces(all, anchors, { text: '', categoryId: null }, gap))).toEqual([[2], []]);
+  });
+
+  it('FE-PLANNER-FOCUSMODEL-012: the day window adds the free morning before the first stop and the evening after the last', () => {
+    const list = [
+      assignment(1, 0, { id: 21, place_time: '11:00', end_time: '12:00' }),
+      assignment(2, 1, { id: 22, place_time: '12:30', end_time: '17:00' }),
+    ];
+    const gaps = (rows: FocusRow[]) =>
+      rows
+        .filter((r): r is FocusGap => r.kind === 'gap')
+        .map((g) => [g.from, g.to, g.position, g.afterName, g.beforeName]);
+
+    expect(gaps(buildDayRows(10, list, []))).toEqual([
+      [540, 660, 0, '', 'Place 21'],
+      [1020, 1260, 2, 'Place 22', ''],
+    ]);
+    expect(gaps(buildDayRows(10, list, [], { start: 10 * 60 + 30, end: 17 * 60 + 30 }))).toEqual([]);
+    expect(dayLoad(buildDayRows(10, list, [])).free).toBe(120 + 240);
+  });
+
+  it('FE-PLANNER-FOCUSMODEL-013: a stop dropped at a slot takes that place in the order; its own slot changes nothing', () => {
+    expect(reorderIds([1, 2, 3, 4], 4, 1)).toEqual([1, 4, 2, 3]);
+    expect(reorderIds([1, 2, 3, 4], 1, 3)).toEqual([2, 3, 1, 4]);
+    expect(reorderIds([1, 2, 3, 4], 2, 4)).toEqual([1, 3, 4, 2]);
+    expect(reorderIds([1, 2, 3, 4], 2, 2)).toEqual([1, 2, 3, 4]);
+    expect(reorderIds([1, 2, 3], 9, 0)).toEqual([1, 2, 3]);
   });
 });
